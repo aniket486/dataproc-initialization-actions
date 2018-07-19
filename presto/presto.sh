@@ -20,7 +20,7 @@ readonly ROLE="$(/usr/share/google/get_metadata_value attributes/dataproc-role)"
 readonly PRESTO_MASTER_FQDN="$(/usr/share/google/get_metadata_value attributes/dataproc-master)"
 readonly WORKER_COUNT=$(/usr/share/google/get_metadata_value attributes/dataproc-worker-count)
 readonly CONNECTOR_JAR="$(find /usr/lib/hadoop/lib -name 'gcs-connector-*.jar')"
-readonly PRESTO_VERSION='0.177'
+readonly PRESTO_VERSION='0.206'
 readonly HTTP_PORT='8080'
 readonly INIT_SCRIPT='/usr/lib/systemd/system/presto.service'
 PRESTO_JVM_MB=0;
@@ -77,14 +77,16 @@ function calculate_memory(){
   PRESTO_JVM_MB=$(( ${spark_container_mb} * ${spark_executor_count} ))
   readonly PRESTO_JVM_MB
 
-  # Give query.max-memorr-per-node 60% of Xmx; this more-or-less assumes a
+  # Give query.max-memory-per-node 60% of Xmx; this more-or-less assumes a
   # single-tenant use case rather than trying to allow many concurrent queries
   # against a shared cluster.
   # Subtract out spark_executor_overhead_mb in both the query MB and reserved
   # system MB as a crude approximation of other unaccounted overhead that we need
   # to leave betweenused bytes and Xmx bytes. Rounding down by integer division
   # here also effectively places round-down bytes in the "general" pool.
+  # Also, allocate some headroom for untracked memory usage (in the heap and to help GC).
   PRESTO_QUERY_NODE_MB=$(( ${PRESTO_JVM_MB} * 6 / 10 - ${spark_executor_overhead_mb} ))
+  PRESTO_HEADROOM_NODE_MB=256
   PRESTO_RESERVED_SYSTEM_MB=$(( ${PRESTO_JVM_MB} * 4 / 10 - ${spark_executor_overhead_mb} ))
   readonly PRESTO_QUERY_NODE_MB
   readonly PRESTO_RESERVED_SYSTEM_MB
@@ -142,7 +144,9 @@ node-scheduler.include-coordinator=${include_coordinator}
 http-server.http.port=${HTTP_PORT}
 query.max-memory=999TB
 query.max-memory-per-node=${PRESTO_QUERY_NODE_MB}MB
+query.max-total-memory-per-node=${PRESTO_QUERY_NODE_MB}MB
 resources.reserved-system-memory=${PRESTO_RESERVED_SYSTEM_MB}MB
+memory.heap-headroom-per-node=${PRESTO_HEADROOM_NODE_MB}MB
 discovery-server.enabled=true
 discovery.uri=http://${PRESTO_MASTER_FQDN}:${HTTP_PORT}
 EOF
@@ -158,6 +162,8 @@ coordinator=false
 http-server.http.port=${HTTP_PORT}
 query.max-memory=999TB
 query.max-memory-per-node=${PRESTO_QUERY_NODE_MB}MB
+query.max-total-memory-per-node=${PRESTO_QUERY_NODE_MB}MB
+memory.heap-headroom-per-node=${PRESTO_HEADROOM_NODE_MB}MB
 resources.reserved-system-memory=${PRESTO_RESERVED_SYSTEM_MB}MB
 discovery.uri=http://${PRESTO_MASTER_FQDN}:${HTTP_PORT}
 EOF
