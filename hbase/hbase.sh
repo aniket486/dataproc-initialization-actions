@@ -22,11 +22,14 @@ readonly CLUSTER_NAME="$(/usr/share/google/get_metadata_value attributes/datapro
 readonly WORKER_COUNT="$(/usr/share/google/get_metadata_value attributes/dataproc-worker-count)"
 readonly MASTER_ADDITIONAL="$(/usr/share/google/get_metadata_value attributes/dataproc-master-additional)"
 readonly ENABLE_KERBEROS="$(/usr/share/google/get_metadata_value attributes/enable-kerberos)"
-readonly KEYTAB_BUCKET="$(/usr/share/google/get_metadata_value attributes/keytab-bucket)"
 readonly DOMAIN=$(dnsdomainname)
 readonly REALM=$(echo "${DOMAIN}" | awk '{print toupper($0)}')
 readonly ROLE="$(/usr/share/google/get_metadata_value attributes/dataproc-role)"
 readonly FQDN=$(hostname -f)
+readonly KEYTAB_DIR="/etc/security/keytab"
+readonly HBASE_MASTER_KEYTAB_FILE="${KEYTAB_DIR}/hbase-master.keytab"
+readonly HBASE_REGIONSERVER_KEYTAB_FILE="${KEYTAB_DIR}/hbase-region.keytab"
+
 
 function retry_command() {
   cmd="$1"
@@ -46,6 +49,16 @@ function update_apt_get() {
 function install_apt_get() {
   pkgs="$@"
   retry_command "apt-get install -y $pkgs"
+}
+
+function add_to_hbase_site_xml_tmp() {
+  local name=$1
+  local value=$2
+
+  bdconfig set_property \
+    --configuration_file 'hbase-site.xml.tmp' \
+    --name "$name" --value "$value" \
+    --clobber
 }
 
 function configure_hbase() {
@@ -114,94 +127,56 @@ EOF
       hbase_root_dir="hdfs://${CLUSTER_NAME}-m:8020/hbase"
     fi
   fi
-  bdconfig set_property \
-    --configuration_file 'hbase-site.xml.tmp' \
-    --name 'hbase.rootdir' --value "${hbase_root_dir}" \
-    --clobber
+  add_to_hbase_site_xml_tmp "hbase.rootdir" "${hbase_root_dir}"
 
   # zookeeper.quorum
   local zookeeper_nodes="$(grep '^server\.' /etc/zookeeper/conf/zoo.cfg \
   | uniq | cut -d '=' -f 2 | cut -d ':' -f 1 | xargs echo | sed "s/ /,/g")"
-  bdconfig set_property \
-      --configuration_file 'hbase-site.xml.tmp' \
-      --name 'hbase.zookeeper.quorum' --value "${zookeeper_nodes}" \
-      --clobber
+  add_to_hbase_site_xml_tmp "hbase.zookeeper.quorum" "${zookeeper_nodes}"
 
   # Prepare kerberos specific config values for hbase-site.xml
   if [ "${ENABLE_KERBEROS}" = true ]; then
-
     # Kerberos authentication
-    bdconfig set_property \
-      --configuration_file 'hbase-site.xml.tmp' \
-      --name 'hbase.security.authentication' --value "kerberos" \
-      --clobber
-    
+    add_to_hbase_site_xml_tmp "hbase.security.authentication" "kerberos"
+
     # Security authorization
-    bdconfig set_property \
-      --configuration_file 'hbase-site.xml.tmp' \
-      --name 'hbase.security.authorization' --value "true" \
-      --clobber
-    
+    add_to_hbase_site_xml_tmp "hbase.security.authorization" "true"
+
     # Kerberos master principal
-    bdconfig set_property \
-      --configuration_file 'hbase-site.xml.tmp' \
-      --name 'hbase.master.kerberos.principal' --value "hbase/_HOST@${REALM}" \
-      --clobber
+    add_to_hbase_site_xml_tmp "hbase.master.kerberos.principal" "hbase/_HOST@${REALM}"
 
     # Kerberos region server principal
-    bdconfig set_property \
-      --configuration_file 'hbase-site.xml.tmp' \
-      --name 'hbase.regionserver.kerberos.principal' --value "hbase/_HOST@${REALM}" \
-      --clobber
+    add_to_hbase_site_xml_tmp "hbase.regionserver.kerberos.principal" "hbase/_HOST@${REALM}"
 
     # Kerberos master server keytab file path
-    bdconfig set_property \
-      --configuration_file 'hbase-site.xml.tmp' \
-      --name 'hbase.master.keytab.file' --value "/etc/hbase/conf/hbase-master.keytab" \
-      --clobber
+    add_to_hbase_site_xml_tmp "hbase.master.keytab.file" \
+        "$HBASE_MASTER_KEYTAB_FILE"
 
     # Kerberos region server keytab file path
-    bdconfig set_property \
-      --configuration_file 'hbase-site.xml.tmp' \
-      --name 'hbase.regionserver.keytab.file' --value "/etc/hbase/conf/hbase-region.keytab" \
-      --clobber
-    
+    add_to_hbase_site_xml_tmp "hbase.regionserver.keytab.file" \
+        "$HBASE_REGIONSERVER_KEYTAB_FILE"
+
     # Zookeeper authentication provider
-    bdconfig set_property \
-      --configuration_file 'hbase-site.xml.tmp' \
-      --name 'hbase.zookeeper.property.authProvider.1' --value "org.apache.zookeeper.server.auth.SASLAuthenticationProvider" \
-      --clobber
-    
+    add_to_hbase_site_xml_tmp "hbase.zookeeper.property.authProvider.1" \
+        "org.apache.zookeeper.server.auth.SASLAuthenticationProvider"
+
     # HBase coprocessor region classes
-    bdconfig set_property \
-      --configuration_file 'hbase-site.xml.tmp' \
-      --name 'hbase.coprocessor.region.classes' --value "org.apache.hadoop.hbase.security.token.TokenProvider" \
-      --clobber
+    add_to_hbase_site_xml_tmp "hbase.coprocessor.region.classes" \
+        "org.apache.hadoop.hbase.security.token.TokenProvider"
 
     # Zookeeper remove host from principal
-    bdconfig set_property \
-      --configuration_file 'hbase-site.xml.tmp' \
-      --name 'hbase.zookeeper.property.kerberos.removeHostFromPrincipal' --value "true" \
-      --clobber
+    add_to_hbase_site_xml_tmp \
+        "hbase.zookeeper.property.kerberos.removeHostFromPrincipal" "true"
 
     # Zookeeper remove realm from principal
-    bdconfig set_property \
-      --configuration_file 'hbase-site.xml.tmp' \
-      --name 'hbase.zookeeper.property.kerberos.removeRealmFromPrincipal' --value "true" \
-      --clobber
+    add_to_hbase_site_xml_tmp \
+        "hbase.zookeeper.property.kerberos.removeRealmFromPrincipal" "true"
 
     # Zookeeper znode
-    bdconfig set_property \
-      --configuration_file 'hbase-site.xml.tmp' \
-      --name 'zookeeper.znode.parent' --value "/hbase-secure" \
-      --clobber
+    add_to_hbase_site_xml_tmp "zookeeper.znode.parent" "/hbase-secure"
 
     # HBase RPC protection
-    bdconfig set_property \
-      --configuration_file 'hbase-site.xml.tmp' \
-      --name 'hbase.rpc.protection' --value "privacy" \
-      --clobber
-
+    add_to_hbase_site_xml_tmp "hbase.rpc.protection" "privacy"
   fi
 
   # Merge all config values to hbase-site.xml
@@ -210,25 +185,37 @@ EOF
     --source_configuration_file hbase-site.xml.tmp \
     --clobber
 
+  ROOT_PRINCIPAL_PASSWORD_URI=$(get_dataproc_property kerberos.root.principal.password.uri)
+  if [[ -z "${ROOT_PRINCIPAL_PASSWORD_URI}" ]] ; then
+    err "Unable to find root principal password. Have you enabled 'KERBEROS' optional component?"
+  fi
+  ROOT_PRINCIPAL_PASSWORD=$(decrypt_with_kms_key "${ROOT_PRINCIPAL_PASSWORD_URI}")
+  if [[ -z "${ROOT_PRINCIPAL_PASSWORD}" ]] ; then
+    err "Root principal password cannot be empty!"
+  fi
+  if [[ "${ENABLE_KERBEROS}" == "true" ]]; then
+
+  
+  
 
   if [ "${ENABLE_KERBEROS}" = true ]; then
     local machine_nr=$(echo $HOSTNAME | sed 's/.*-.-\([0-9]\)*.*/\1/g')
     local masters=$(/usr/share/google/get_metadata_value attributes/dataproc-master),$(/usr/share/google/get_metadata_value attributes/dataproc-master-additional)
 
-    if [[ $machine_nr -eq "0" ]] && [[ "${ROLE}" == "Master" ]]; then 
+    if [[ $machine_nr -eq "0" ]] && [[ "${ROLE}" == "Master" ]]; then
       # Master
       export IFS=","
-      for m in $masters; 
-      do  
+      for m in $masters;
+      do
         sudo kadmin.local -q "addprinc -randkey hbase/${m}.${DOMAIN}@${REALM}"
         echo "Generating hbase keytab..."
         sudo kadmin.local -q "xst -k ${HBASE_HOME}/conf/hbase-${m}.keytab hbase/${m}.${DOMAIN}"
         sudo gsutil cp ${HBASE_HOME}/conf/hbase-${m}.keytab ${KEYTAB_BUCKET}/keytabs/${CLUSTER_NAME}/hbase-${m}.keytab
       done
-      
+
       # Worker
       for (( c="0"; c<$WORKER_COUNT; c++ ))
-      do  
+      do
         sudo kadmin.local -q "addprinc -randkey hbase/${CLUSTER_NAME}-w-${c}.${DOMAIN}"
         echo "Generating hbase keytab..."
         sudo kadmin.local -q "xst -k ${HBASE_HOME}/conf/hbase-${CLUSTER_NAME}-w-${c}.keytab hbase/${CLUSTER_NAME}-w-${c}.${DOMAIN}"
@@ -249,7 +236,7 @@ EOF
     else
       hbase_keytab_path=${HBASE_HOME}/conf/hbase-region.keytab
     fi
-    
+
     # Copy keytab to machine
     sudo gsutil cp ${KEYTAB_BUCKET}/keytabs/${CLUSTER_NAME}/hbase-${HOSTNAME}.keytab $hbase_keytab_path
 
@@ -258,7 +245,7 @@ EOF
       sudo chown hbase:hbase $hbase_keytab_path
       sudo chmod 0400 $hbase_keytab_path
     fi
-    
+
     # Change regionserver information
     for (( c="0"; c<$WORKER_COUNT; c++ ))
     do
@@ -266,7 +253,7 @@ EOF
     done
     sudo mv /tmp/regionservers ${HBASE_HOME}/conf/regionservers
 
-    # Add server JAAS 
+    # Add server JAAS
     cat > /tmp/hbase-server.jaas << EOF
 Client {
   com.sun.security.auth.module.Krb5LoginModule required
@@ -275,9 +262,9 @@ Client {
   useTicketCache=false
   keyTab="${hbase_keytab_path}"
   principal="hbase/${FQDN}";
-}; 
+};
 EOF
-  
+
     # Copy JAAS file to hbase conf directory
     sudo mv /tmp/hbase-server.jaas ${HBASE_HOME}/conf/hbase-server.jaas
 
@@ -298,7 +285,7 @@ EOF
     cat ${HBASE_HOME}/conf/hbase-env.sh > /tmp/hbase-env.sh
     cat >> /tmp/hbase-env.sh << EOF
 export HBASE_MANAGES_ZK=false
-export HBASE_OPTS="\$HBASE_OPTS -Djava.security.auth.login.config=/etc/hbase/conf/hbase-client.jaas" 
+export HBASE_OPTS="\$HBASE_OPTS -Djava.security.auth.login.config=/etc/hbase/conf/hbase-client.jaas"
 export HBASE_MASTER_OPTS="\$HBASE_MASTER_OPTS -Djava.security.auth.login.config=/etc/hbase/conf/hbase-server.jaas"
 export HBASE_REGIONSERVER_OPTS="\$HBASE_REGIONSERVER_OPTS -Djava.security.auth.login.config=/etc/hbase/conf/hbase-server.jaas"
 EOF
@@ -315,7 +302,6 @@ EOF
 
 
 function main() {
-  
   update_apt_get || err 'Unable to update packages lists.'
   install_apt_get hbase || err 'Unable to install hbase.'
 
